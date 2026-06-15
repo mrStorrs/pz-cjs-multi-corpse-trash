@@ -1,0 +1,7 @@
+name=CJS Multi-Corpse Trash
+id=cjsMultiCorpseTrash
+description=Restores a corpse-to-trash-can context action for boosted trash cans that can hold multiple corpses.
+poster=poster.png
+author=CJ Storrs
+modversion=0.1.0
+versionMin=42.0.0
