@@ -1,8 +1,9 @@
 require "ISUI/ISWorldObjectContextMenu"
+require "TimedActions/ISBaseTimedAction"
 require "TimedActions/ISInventoryTransferAction"
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.0"
+CJSMultiCorpseTrash.version = "0.1.1"
 
 local unpackArgs = unpack or table.unpack
 
@@ -44,6 +45,46 @@ end
 local function isCorpseItem(item)
     local itemType = call(item, "getType")
     return itemType == "CorpseMale" or itemType == "CorpseFemale"
+end
+
+local function isDeadBody(object)
+    if not object then return false end
+    if instanceof and instanceof(object, "IsoDeadBody") then return true end
+    return call(object, "getObjectName") == "DeadBody" and isCorpseItem(call(object, "getItem"))
+end
+
+local function corpseItemForBody(body)
+    local item = call(body, "getItem")
+    if isCorpseItem(item) then return item end
+    return nil
+end
+
+local function deadBodyFromCandidate(object)
+    if isDeadBody(object) then return object end
+
+    local size = tonumber(call(object, "size"))
+    if not size then return nil end
+
+    for index = 0, size - 1 do
+        local candidate = call(object, "get", index)
+        if isDeadBody(candidate) then return candidate end
+    end
+
+    return nil
+end
+
+local function draggedCorpseBody(playerObj)
+    if call(playerObj, "isDraggingCorpse") ~= true then return nil end
+
+    local corpseBody = deadBodyFromCandidate(call(playerObj, "getDragObject"))
+    if corpseBody then return corpseBody end
+
+    return deadBodyFromCandidate(call(playerObj, "getDragCharacter"))
+end
+
+local function clearDraggedCorpse(playerObj)
+    call(playerObj, "setDragObject", nil)
+    call(playerObj, "setDragCharacter", nil)
 end
 
 local function carriedCorpse(playerObj)
@@ -204,6 +245,31 @@ local function addTooltip(option, name, description)
     option.toolTip = tip
 end
 
+local function containerHasCapacity(container, playerObj, item)
+    local capacity = tonumber(call(container, "getEffectiveCapacity", playerObj))
+    if not capacity then
+        capacity = tonumber(call(container, "getCapacity"))
+    end
+    if not capacity then return true end
+
+    local contentsWeight = tonumber(call(container, "getContentsWeight")) or 0
+    local itemWeight = tonumber(call(item, "getUnequippedWeight"))
+    if not itemWeight then
+        itemWeight = tonumber(call(item, "getActualWeight")) or 0
+    end
+
+    return contentsWeight + itemWeight <= capacity
+end
+
+local function updateContainerAfterAdd(container, trashCan)
+    call(container, "setDrawDirty", true)
+    call(container, "setHasBeenLooted", true)
+
+    if not isClient() and trashCan and call(trashCan, "getOverlaySprite") and ItemPicker then
+        ItemPicker.updateOverlaySprite(trashCan)
+    end
+end
+
 local function putCorpseInTrash(playerObj, trashCan, corpse)
     if not playerObj or not trashCan or not isCorpseItem(corpse) then return end
 
@@ -222,6 +288,108 @@ local function putCorpseInTrash(playerObj, trashCan, corpse)
     ISTimedActionQueue.add(ISInventoryTransferAction:new(playerObj, corpse, source, container))
 end
 
+CJSPutDraggedCorpseInTrashAction = ISBaseTimedAction:derive("CJSPutDraggedCorpseInTrashAction")
+
+function CJSPutDraggedCorpseInTrashAction:isValid()
+    local container = call(self.trashCan, "getContainer")
+    local corpse = corpseItemForBody(self.corpseBody)
+    if not container or not corpse then return false end
+    if call(container, "isItemAllowed", corpse) ~= true then return false end
+    if not containerHasCapacity(container, self.character, corpse) then return false end
+
+    return draggedCorpseBody(self.character) == self.corpseBody
+end
+
+function CJSPutDraggedCorpseInTrashAction:waitToStart()
+    self.character:faceThisObject(self.trashCan)
+    return self.character:shouldBeTurning()
+end
+
+function CJSPutDraggedCorpseInTrashAction:update()
+    local corpse = corpseItemForBody(self.corpseBody)
+    if corpse then corpse:setJobDelta(self:getJobDelta()) end
+
+    self.character:faceThisObject(self.trashCan)
+    self.character:setMetabolicTarget(Metabolics.LightWork)
+end
+
+function CJSPutDraggedCorpseInTrashAction:start()
+    local corpse = corpseItemForBody(self.corpseBody)
+    if corpse then
+        corpse:setJobType("Putting corpse in garbage")
+        corpse:setJobDelta(0.0)
+    end
+
+    self:setActionAnim("Loot")
+    self.character:SetVariable("LootPosition", "Low")
+    self.character:reportEvent("EventLootItem")
+end
+
+function CJSPutDraggedCorpseInTrashAction:stop()
+    local corpse = corpseItemForBody(self.corpseBody)
+    if corpse then corpse:setJobDelta(0.0) end
+    ISBaseTimedAction.stop(self)
+end
+
+function CJSPutDraggedCorpseInTrashAction:perform()
+    local container = call(self.trashCan, "getContainer")
+    local corpse = corpseItemForBody(self.corpseBody)
+    if container and corpse then
+        corpse:setJobDelta(0.0)
+
+        if isClient() and call(container, "isInCharacterInventory", self.character) ~= true then
+            call(container, "addItemOnServer", corpse)
+        end
+
+        call(container, "AddItem", corpse)
+
+        local square = call(self.corpseBody, "getSquare")
+        if square then
+            square:removeCorpse(self.corpseBody, false)
+        else
+            call(self.corpseBody, "removeFromWorld")
+            call(self.corpseBody, "removeFromSquare")
+        end
+
+        clearDraggedCorpse(self.character)
+        updateContainerAfterAdd(container, self.trashCan)
+    end
+
+    ISBaseTimedAction.perform(self)
+end
+
+function CJSPutDraggedCorpseInTrashAction:new(character, trashCan, corpseBody)
+    local o = {}
+    setmetatable(o, self)
+    self.__index = self
+    o.character = character
+    o.trashCan = trashCan
+    o.corpseBody = corpseBody
+    o.stopOnWalk = true
+    o.stopOnRun = true
+    o.maxTime = 50
+    o.forceProgressBar = true
+    if character:isTimedActionInstant() then
+        o.maxTime = 1
+    end
+    return o
+end
+
+local function putDraggedCorpseInTrash(playerObj, trashCan, corpseBody)
+    if not playerObj or not trashCan or not isDeadBody(corpseBody) then return end
+
+    local container = call(trashCan, "getContainer")
+    local corpse = corpseItemForBody(corpseBody)
+    if not container or not corpse then return end
+    if call(container, "isItemAllowed", corpse) ~= true then return end
+
+    if luautils and luautils.walkAdj then
+        if not luautils.walkAdj(playerObj, call(trashCan, "getSquare"), true) then return end
+    end
+
+    ISTimedActionQueue.add(CJSPutDraggedCorpseInTrashAction:new(playerObj, trashCan, corpseBody))
+end
+
 local function setContextTest()
     if ISWorldObjectContextMenu and ISWorldObjectContextMenu.setTest then
         return ISWorldObjectContextMenu.setTest()
@@ -236,7 +404,8 @@ local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
     local playerObj = getSpecificPlayer(player)
     if not playerObj or call(playerObj, "getVehicle") then return end
 
-    local corpse = carriedCorpse(playerObj)
+    local corpseBody = draggedCorpseBody(playerObj)
+    local corpse = corpseItemForBody(corpseBody) or carriedCorpse(playerObj)
     if not corpse then return end
 
     local trashCan = findTrashCan(worldobjects, playerObj)
@@ -248,10 +417,16 @@ local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
     if test then return setContextTest() end
 
     local optionName = "Put Corpse in Garbage"
-    local option = context:addOption(optionName, playerObj, putCorpseInTrash, trashCan, corpse)
-    if call(container, "hasRoomFor", playerObj, corpse) == false then
+    local option
+    if corpseBody then
+        option = context:addOption(optionName, playerObj, putDraggedCorpseInTrash, trashCan, corpseBody)
+    else
+        option = context:addOption(optionName, playerObj, putCorpseInTrash, trashCan, corpse)
+    end
+
+    if not containerHasCapacity(container, playerObj, corpse) then
         option.notAvailable = true
-        addTooltip(option, optionName, "This trash can does not have room for the carried corpse.")
+        addTooltip(option, optionName, "This trash can does not have room for the corpse.")
     end
 end
 
