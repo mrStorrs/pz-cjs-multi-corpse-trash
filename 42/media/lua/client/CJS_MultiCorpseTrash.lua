@@ -3,7 +3,7 @@ require "TimedActions/ISBaseTimedAction"
 require "TimedActions/ISInventoryTransferAction"
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.1"
+CJSMultiCorpseTrash.version = "0.1.2"
 
 local unpackArgs = unpack or table.unpack
 
@@ -59,6 +59,47 @@ local function corpseItemForBody(body)
     return nil
 end
 
+local function deadBodyOnSquare(square)
+    local body = call(square, "getDeadBody")
+    if isDeadBody(body) then return body end
+
+    local movingObjects = call(square, "getStaticMovingObjects")
+    if movingObjects then
+        for index = 0, movingObjects:size() - 1 do
+            body = movingObjects:get(index)
+            if isDeadBody(body) then return body end
+        end
+    end
+
+    return nil
+end
+
+local function scanAroundForDeadBody(square)
+    if not square then return nil end
+
+    local body = deadBodyOnSquare(square)
+    if body then return body end
+
+    local cell = getCell and getCell()
+    if not cell then return nil end
+
+    local x = call(square, "getX")
+    local y = call(square, "getY")
+    local z = call(square, "getZ")
+    if x == nil or y == nil or z == nil then return nil end
+
+    for dx = -1, 1 do
+        for dy = -1, 1 do
+            if dx ~= 0 or dy ~= 0 then
+                body = deadBodyOnSquare(cell:getGridSquare(x + dx, y + dy, z))
+                if body then return body end
+            end
+        end
+    end
+
+    return nil
+end
+
 local function deadBodyFromCandidate(object)
     if isDeadBody(object) then return object end
 
@@ -79,7 +120,10 @@ local function draggedCorpseBody(playerObj)
     local corpseBody = deadBodyFromCandidate(call(playerObj, "getDragObject"))
     if corpseBody then return corpseBody end
 
-    return deadBodyFromCandidate(call(playerObj, "getDragCharacter"))
+    corpseBody = deadBodyFromCandidate(call(playerObj, "getDragCharacter"))
+    if corpseBody then return corpseBody end
+
+    return scanAroundForDeadBody(call(playerObj, "getCurrentSquare"))
 end
 
 local function clearDraggedCorpse(playerObj)
@@ -398,9 +442,7 @@ local function setContextTest()
     return true
 end
 
-local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
-    if test and ISWorldObjectContextMenu.Test then return true end
-
+local function buildCorpseTrashOffer(player, worldobjects)
     local playerObj = getSpecificPlayer(player)
     if not playerObj or call(playerObj, "getVehicle") then return end
 
@@ -414,21 +456,74 @@ local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
     local container = call(trashCan, "getContainer")
     if not container or call(container, "isItemAllowed", corpse) ~= true then return end
 
+    return {
+        playerObj = playerObj,
+        corpse = corpse,
+        corpseBody = corpseBody,
+        trashCan = trashCan,
+        container = container,
+    }
+end
+
+local function addCorpseTrashOption(player, context, worldobjects, test, forceVisible)
+    if test and ISWorldObjectContextMenu.Test then return true end
+
+    local offer = buildCorpseTrashOffer(player, worldobjects)
+    if not offer then return false end
+
     if test then return setContextTest() end
+    if not context then return false end
 
     local optionName = "Put Corpse in Garbage"
-    local option
-    if corpseBody then
-        option = context:addOption(optionName, playerObj, putDraggedCorpseInTrash, trashCan, corpseBody)
-    else
-        option = context:addOption(optionName, playerObj, putCorpseInTrash, trashCan, corpse)
+    if context:getOptionFromName(optionName) then
+        if forceVisible then context:setVisible(true) end
+        return true
     end
 
-    if not containerHasCapacity(container, playerObj, corpse) then
+    local option
+    if offer.corpseBody then
+        option = context:addOption(optionName, offer.playerObj, putDraggedCorpseInTrash, offer.trashCan, offer.corpseBody)
+    else
+        option = context:addOption(optionName, offer.playerObj, putCorpseInTrash, offer.trashCan, offer.corpse)
+    end
+
+    if not containerHasCapacity(offer.container, offer.playerObj, offer.corpse) then
         option.notAvailable = true
         addTooltip(option, optionName, "This trash can does not have room for the corpse.")
     end
+
+    if forceVisible then context:setVisible(true) end
+    return true
+end
+
+local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
+    return addCorpseTrashOption(player, context, worldobjects, test, false)
 end
 
 Events.OnFillWorldObjectContextMenu.Add(onFillWorldObjectContextMenu)
+
+local vanillaCreateMenu = ISWorldObjectContextMenu.createMenu
+ISWorldObjectContextMenu.createMenu = function(player, worldobjects, x, y, test)
+    local result = vanillaCreateMenu(player, worldobjects, x, y, test)
+
+    if test then
+        if result then return result end
+        if addCorpseTrashOption(player, nil, worldobjects, true, false) then return true end
+        return result
+    end
+
+    local context = nil
+    if type(result) == "table" and result.addOption then
+        context = result
+    elseif buildCorpseTrashOffer(player, worldobjects) and ISContextMenu then
+        context = ISContextMenu.get(player, x or 0, y or 0)
+    end
+
+    if context and addCorpseTrashOption(player, context, worldobjects, false, true) then
+        return context
+    end
+
+    return result
+end
+
 print("[cjsMultiCorpseTrash] Loaded client " .. CJSMultiCorpseTrash.version)
