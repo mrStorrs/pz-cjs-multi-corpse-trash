@@ -6,4 +6,4 @@ This mod does not change trash-can capacity; pair it with a storage-capacity mod
 
 Version 0.1.2 wraps the vanilla world-context menu creation so the action can still appear while a corpse is being dragged and vanilla returns before late mod hooks run.
 
-Version 0.1.3-debug adds verbose Lua console logging for menu creation, corpse detection, trash detection, and action execution.
+Version 0.1.4-debug adds verbose Lua console logging for menu creation, corpse detection, carried corpse inventory state, vanilla corpse-grab completion, trash detection, and action execution.

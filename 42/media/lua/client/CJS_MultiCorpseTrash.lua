@@ -1,9 +1,10 @@
 require "ISUI/ISWorldObjectContextMenu"
 require "TimedActions/ISBaseTimedAction"
+require "TimedActions/ISGrabCorpseAction"
 require "TimedActions/ISInventoryTransferAction"
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.3-debug"
+CJSMultiCorpseTrash.version = "0.1.4-debug"
 CJSMultiCorpseTrash.debug = true
 
 local unpackArgs = unpack or table.unpack
@@ -213,17 +214,53 @@ end
 
 local function carriedCorpse(playerObj)
     local primary = call(playerObj, "getPrimaryHandItem")
+    local secondary = call(playerObj, "getSecondaryHandItem")
+    local inventory = call(playerObj, "getInventory")
+
+    debugLog(
+        "carried-corpse check primary="
+        .. describeItem(primary)
+        .. " secondary="
+        .. describeItem(secondary)
+        .. " inventory="
+        .. tostring(inventory)
+        .. " maleCount="
+        .. tostring(call(inventory, "getItemCount", "Base.CorpseMale"))
+        .. " femaleCount="
+        .. tostring(call(inventory, "getItemCount", "Base.CorpseFemale"))
+    )
+
     if isCorpseItem(primary) then return primary end
 
-    local secondary = call(playerObj, "getSecondaryHandItem")
     if isCorpseItem(secondary) then return secondary end
 
-    local inventory = call(playerObj, "getInventory")
     if inventory then
-        return call(inventory, "getFirstEvalRecurse", isCorpseItem)
+        local corpse = call(inventory, "getFirstEvalRecurse", isCorpseItem)
+        debugLog("carried-corpse inventory result " .. describeItem(corpse))
+        return corpse
     end
 
     return nil
+end
+
+if ISGrabCorpseAction and ISGrabCorpseAction.perform and not CJSMultiCorpseTrash.grabCorpseActionWrapped then
+    local vanillaGrabCorpsePerform = ISGrabCorpseAction.perform
+    ISGrabCorpseAction.perform = function(self)
+        debugLog("grab-corpse perform before corpse=" .. describeItem(self.corpse) .. " body=" .. describeObject(self.corpseBody))
+        local result = vanillaGrabCorpsePerform(self)
+        debugLog(
+            "grab-corpse perform after primary="
+            .. describeItem(call(self.character, "getPrimaryHandItem"))
+            .. " secondary="
+            .. describeItem(call(self.character, "getSecondaryHandItem"))
+            .. " maleCount="
+            .. tostring(call(call(self.character, "getInventory"), "getItemCount", "Base.CorpseMale"))
+            .. " femaleCount="
+            .. tostring(call(call(self.character, "getInventory"), "getItemCount", "Base.CorpseFemale"))
+        )
+        return result
+    end
+    CJSMultiCorpseTrash.grabCorpseActionWrapped = true
 end
 
 local function spriteProperties(object)
@@ -686,8 +723,10 @@ Events.OnPlayerUpdate.Add(function(playerObj)
     local trashCan = scanAround(square, scanSquareForTrashCan)
     local dragObject = call(playerObj, "getDragObject")
     local dragCharacter = call(playerObj, "getDragCharacter")
+    local primary = call(playerObj, "getPrimaryHandItem")
+    local secondary = call(playerObj, "getSecondaryHandItem")
 
-    if body or trashCan or dragObject or dragCharacter then
+    if body or trashCan or dragObject or dragCharacter or isCorpseItem(primary) or isCorpseItem(secondary) then
         debugLog(
             "tick playerSquare="
             .. describeSquare(square)
@@ -699,6 +738,10 @@ Events.OnPlayerUpdate.Add(function(playerObj)
             .. describeObject(dragObject)
             .. " dragCharacter="
             .. describeObject(dragCharacter)
+            .. " primary="
+            .. describeItem(primary)
+            .. " secondary="
+            .. describeItem(secondary)
         )
     end
 end)
