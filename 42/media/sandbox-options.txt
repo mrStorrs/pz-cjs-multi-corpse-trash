@@ -1,0 +1,9 @@
+VERSION = 1,
+
+option CJSMultiCorpseTrash.DebugLogging
+{
+    type = boolean,
+    default = false,
+    page = CJSMultiCorpseTrash,
+    translation = CJSMultiCorpseTrash_DebugLogging,
+}

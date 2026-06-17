@@ -1,0 +1,6 @@
+Sandbox_EN = {
+    Sandbox_CJSMultiCorpseTrash = "CJS Multi-Corpse Trash",
+
+    Sandbox_CJSMultiCorpseTrash_DebugLogging = "Debug Logging",
+    Sandbox_CJSMultiCorpseTrash_DebugLogging_tooltip = "Prints corpse detection and trash context-menu diagnostics to the Lua console.",
+}

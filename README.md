@@ -6,4 +6,4 @@ This mod does not change trash-can capacity; pair it with a storage-capacity mod
 
 Version 0.1.2 wraps the vanilla world-context menu creation so the action can still appear while a corpse is being dragged and vanilla returns before late mod hooks run.
 
-Version 0.1.6-debug caches the corpse item at pickup time and uses that cached item while the game reports corpse-dragging but hides the corpse from inventory, hands, and nearby squares.
+Version 0.1.7 keeps the working dropped-corpse trash action and moves diagnostic logging behind the **Debug Logging** sandbox option, which defaults off.

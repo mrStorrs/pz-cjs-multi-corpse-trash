@@ -5,11 +5,14 @@ require "TimedActions/ISInventoryTransferAction"
 pcall(require, "PickupCorpse/TimedActions/ISPickupCorpseAction")
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.6-debug"
-CJSMultiCorpseTrash.debug = true
+CJSMultiCorpseTrash.version = "0.1.7"
 CJSMultiCorpseTrash.draggedCorpseByPlayer = CJSMultiCorpseTrash.draggedCorpseByPlayer or {}
 
 local unpackArgs = unpack or table.unpack
+
+local defaults = {
+    DebugLogging = false,
+}
 
 local trashNameTokens = {
     "dumpster",
@@ -50,8 +53,21 @@ local function hasText(value)
     return value ~= nil and value ~= false and tostring(value) ~= ""
 end
 
+local function getSandboxVars()
+    return SandboxVars and SandboxVars.CJSMultiCorpseTrash or nil
+end
+
+local function option(key)
+    local vars = getSandboxVars()
+    if vars and vars[key] ~= nil then
+        return vars[key]
+    end
+
+    return defaults[key]
+end
+
 local function debugLog(message)
-    if CJSMultiCorpseTrash.debug then
+    if option("DebugLogging") then
         print("[cjsMultiCorpseTrash] " .. tostring(message))
     end
 end
@@ -1052,7 +1068,7 @@ end
 
 local debugUpdateCounter = 0
 Events.OnPlayerUpdate.Add(function(playerObj)
-    if not CJSMultiCorpseTrash.debug then return end
+    if not option("DebugLogging") then return end
     if not playerObj then return end
     local isLocalPlayer = call(playerObj, "isLocalPlayer")
     if isLocalPlayer == false then return end
