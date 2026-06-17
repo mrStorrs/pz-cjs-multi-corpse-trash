@@ -4,7 +4,7 @@ require "TimedActions/ISGrabCorpseAction"
 require "TimedActions/ISInventoryTransferAction"
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.4-debug"
+CJSMultiCorpseTrash.version = "0.1.5-debug"
 CJSMultiCorpseTrash.debug = true
 
 local unpackArgs = unpack or table.unpack
@@ -29,9 +29,10 @@ local function call(object, methodName, ...)
     if not okMethod then return nil end
     if not method then return nil end
 
+    local argCount = select("#", ...)
     local args = { ... }
     local ok, result = pcall(function()
-        return method(object, unpackArgs(args))
+        return method(object, unpackArgs(args, 1, argCount))
     end)
 
     if ok then return result end
@@ -101,7 +102,29 @@ local function describeItem(item)
         .. " name=" .. tostring(call(item, "getName"))
 end
 
-local function isCorpseItem(item)
+local function tableValue(object, key)
+    if not object then return nil end
+
+    local ok, result = pcall(function()
+        return object[key]
+    end)
+
+    if ok then return result end
+    return nil
+end
+
+local isCorpseItem
+
+local function describeValue(value)
+    if value == nil then return "nil" end
+    if isCorpseItem(value) then return describeItem(value) end
+    if type(value) == "table" then
+        return tostring(value) .. " Type=" .. tostring(tableValue(value, "Type")) .. " type=" .. tostring(tableValue(value, "type"))
+    end
+    return describeObject(value)
+end
+
+function isCorpseItem(item)
     local itemType = call(item, "getType")
     return itemType == "CorpseMale" or itemType == "CorpseFemale"
 end
@@ -173,7 +196,101 @@ local function deadBodyFromCandidate(object)
     return nil
 end
 
-local function draggedCorpseBody(playerObj)
+local dragBodyKeys = {
+    "corpseBody",
+    "deadBody",
+    "body",
+    "corpse",
+    "WItem",
+    "worldItem",
+    "item",
+    "object",
+    "target",
+    "dragObject",
+}
+
+local function describeDragState(dragState)
+    if not dragState then return "nil" end
+
+    local parts = {
+        tostring(dragState),
+        "Type=" .. tostring(tableValue(dragState, "Type")),
+        "type=" .. tostring(tableValue(dragState, "type")),
+        "class=" .. tostring(call(call(dragState, "getClass"), "getName")),
+    }
+
+    for _, key in ipairs(dragBodyKeys) do
+        local value = tableValue(dragState, key)
+        if value ~= nil and type(value) ~= "function" then
+            table.insert(parts, key .. "=" .. describeValue(value))
+        end
+    end
+
+    local ok = pcall(function()
+        local count = 0
+        for key, value in pairs(dragState) do
+            if type(value) ~= "function" then
+                count = count + 1
+                if count <= 12 then
+                    table.insert(parts, "pair." .. tostring(key) .. "=" .. describeValue(value))
+                end
+            end
+        end
+    end)
+    if not ok then table.insert(parts, "pairs=unavailable") end
+
+    return table.concat(parts, " ")
+end
+
+local function activeCellDrag(player)
+    local cell = getCell and getCell()
+    local dragState = call(cell, "getDrag", player)
+    debugLog("cell-drag player=" .. tostring(player) .. " drag=" .. describeDragState(dragState))
+    return dragState
+end
+
+local function deadBodyFromDragState(dragState)
+    if not dragState then return nil end
+
+    for _, key in ipairs(dragBodyKeys) do
+        local body = deadBodyFromCandidate(tableValue(dragState, key))
+        if body then
+            debugLog("corpse-detect hit cell-drag field " .. key .. " " .. describeObject(body))
+            return body
+        end
+    end
+
+    for _, methodName in ipairs({ "getCorpseBody", "getDeadBody", "getBody", "getCorpse", "getObject", "getItem" }) do
+        local body = deadBodyFromCandidate(call(dragState, methodName))
+        if body then
+            debugLog("corpse-detect hit cell-drag method " .. methodName .. " " .. describeObject(body))
+            return body
+        end
+    end
+
+    local ok, hitKey, body = pcall(function()
+        for key, value in pairs(dragState) do
+            local body = deadBodyFromCandidate(value)
+            if body then
+                return key, body
+            end
+        end
+        return nil, nil
+    end)
+
+    if ok and body then
+        debugLog("corpse-detect hit cell-drag pair " .. tostring(hitKey) .. " " .. describeObject(body))
+        return body
+    end
+
+    debugLog("corpse-detect no body in cell-drag " .. describeDragState(dragState))
+    return nil
+end
+
+local function draggedCorpseBody(playerObj, dragState)
+    local corpseBody = deadBodyFromDragState(dragState)
+    if corpseBody then return corpseBody end
+
     local hasDraggingMethod = call(playerObj, "isDraggingCorpse") ~= nil
     local draggingValue = call(playerObj, "isDraggingCorpse")
     local dragObject = call(playerObj, "getDragObject")
@@ -190,7 +307,7 @@ local function draggedCorpseBody(playerObj)
         .. describeObject(dragCharacter)
     )
 
-    local corpseBody = deadBodyFromCandidate(dragObject)
+    corpseBody = deadBodyFromCandidate(dragObject)
     if corpseBody then
         debugLog("corpse-detect hit getDragObject " .. describeObject(corpseBody))
         return corpseBody
@@ -210,6 +327,12 @@ end
 local function clearDraggedCorpse(playerObj)
     call(playerObj, "setDragObject", nil)
     call(playerObj, "setDragCharacter", nil)
+    call(playerObj, "setDraggingCorpse", false)
+    call(playerObj, "setIsDraggingCorpse", false)
+    call(playerObj, "stopDraggingCorpse")
+
+    local cell = getCell and getCell()
+    call(cell, "setDrag", nil, call(playerObj, "getPlayerNum") or 0)
 end
 
 local function carriedCorpse(playerObj)
@@ -485,8 +608,8 @@ function CJSPutDraggedCorpseInTrashAction:isValid()
         return false
     end
 
-    local activeCorpse = draggedCorpseBody(self.character)
-    local valid = activeCorpse == self.corpseBody
+    local activeCorpse = draggedCorpseBody(self.character, self.dragState)
+    local valid = activeCorpse == self.corpseBody or (self.dragState ~= nil and isDeadBody(self.corpseBody))
     debugLog("action isValid active=" .. describeObject(activeCorpse) .. " expected=" .. describeObject(self.corpseBody) .. " valid=" .. tostring(valid))
     return valid
 end
@@ -552,13 +675,14 @@ function CJSPutDraggedCorpseInTrashAction:perform()
     ISBaseTimedAction.perform(self)
 end
 
-function CJSPutDraggedCorpseInTrashAction:new(character, trashCan, corpseBody)
+function CJSPutDraggedCorpseInTrashAction:new(character, trashCan, corpseBody, dragState)
     local o = {}
     setmetatable(o, self)
     self.__index = self
     o.character = character
     o.trashCan = trashCan
     o.corpseBody = corpseBody
+    o.dragState = dragState
     o.stopOnWalk = true
     o.stopOnRun = true
     o.maxTime = 50
@@ -569,7 +693,7 @@ function CJSPutDraggedCorpseInTrashAction:new(character, trashCan, corpseBody)
     return o
 end
 
-local function putDraggedCorpseInTrash(playerObj, trashCan, corpseBody)
+local function putDraggedCorpseInTrash(playerObj, trashCan, corpseBody, dragState)
     if not playerObj or not trashCan or not isDeadBody(corpseBody) then return end
 
     local container = call(trashCan, "getContainer")
@@ -581,7 +705,7 @@ local function putDraggedCorpseInTrash(playerObj, trashCan, corpseBody)
         if not luautils.walkAdj(playerObj, call(trashCan, "getSquare"), true) then return end
     end
 
-    ISTimedActionQueue.add(CJSPutDraggedCorpseInTrashAction:new(playerObj, trashCan, corpseBody))
+    ISTimedActionQueue.add(CJSPutDraggedCorpseInTrashAction:new(playerObj, trashCan, corpseBody, dragState))
 end
 
 local function setContextTest()
@@ -592,9 +716,9 @@ local function setContextTest()
     return true
 end
 
-local function buildCorpseTrashOffer(player, worldobjects)
+local function buildCorpseTrashOffer(player, worldobjects, dragState)
     local playerObj = getSpecificPlayer(player)
-    debugLog("offer start player=" .. tostring(player) .. " worldobjects=" .. tostring(sizeOf(worldobjects)) .. " playerObj=" .. tostring(playerObj))
+    debugLog("offer start player=" .. tostring(player) .. " worldobjects=" .. tostring(sizeOf(worldobjects)) .. " playerObj=" .. tostring(playerObj) .. " dragState=" .. describeDragState(dragState))
     if not playerObj then
         debugLog("offer fail no playerObj")
         return
@@ -604,7 +728,7 @@ local function buildCorpseTrashOffer(player, worldobjects)
         return
     end
 
-    local corpseBody = draggedCorpseBody(playerObj)
+    local corpseBody = draggedCorpseBody(playerObj, dragState)
     local corpse = corpseItemForBody(corpseBody) or carriedCorpse(playerObj)
     if not corpse then
         debugLog("offer fail no corpse corpseBody=" .. describeObject(corpseBody))
@@ -636,14 +760,15 @@ local function buildCorpseTrashOffer(player, worldobjects)
         corpseBody = corpseBody,
         trashCan = trashCan,
         container = container,
+        dragState = dragState,
     }
 end
 
-local function addCorpseTrashOption(player, context, worldobjects, test, forceVisible)
+local function addCorpseTrashOption(player, context, worldobjects, test, forceVisible, prebuiltOffer)
     debugLog("add-option start test=" .. tostring(test) .. " forceVisible=" .. tostring(forceVisible) .. " context=" .. tostring(context))
     if test and ISWorldObjectContextMenu.Test then return true end
 
-    local offer = buildCorpseTrashOffer(player, worldobjects)
+    local offer = prebuiltOffer or buildCorpseTrashOffer(player, worldobjects)
     if not offer then return false end
 
     if test then return setContextTest() end
@@ -658,7 +783,7 @@ local function addCorpseTrashOption(player, context, worldobjects, test, forceVi
 
     local option
     if offer.corpseBody then
-        option = context:addOption(optionName, offer.playerObj, putDraggedCorpseInTrash, offer.trashCan, offer.corpseBody)
+        option = context:addOption(optionName, offer.playerObj, putDraggedCorpseInTrash, offer.trashCan, offer.corpseBody, offer.dragState)
     else
         option = context:addOption(optionName, offer.playerObj, putCorpseInTrash, offer.trashCan, offer.corpse)
     end
@@ -683,23 +808,29 @@ Events.OnFillWorldObjectContextMenu.Add(onFillWorldObjectContextMenu)
 local vanillaCreateMenu = ISWorldObjectContextMenu.createMenu
 ISWorldObjectContextMenu.createMenu = function(player, worldobjects, x, y, test)
     debugLog("createMenu wrapper start player=" .. tostring(player) .. " test=" .. tostring(test) .. " x=" .. tostring(x) .. " y=" .. tostring(y) .. " worldobjects=" .. tostring(sizeOf(worldobjects)))
+    local preDragState = activeCellDrag(player)
+    local preOffer = buildCorpseTrashOffer(player, worldobjects, preDragState)
+    debugLog("createMenu pre-vanilla offer=" .. tostring(preOffer ~= nil))
+
     local result = vanillaCreateMenu(player, worldobjects, x, y, test)
     debugLog("createMenu vanilla result=" .. tostring(result))
 
     if test then
         if result then return result end
-        if addCorpseTrashOption(player, nil, worldobjects, true, false) then return true end
+        if addCorpseTrashOption(player, nil, worldobjects, true, false, preOffer) then return true end
         return result
     end
 
     local context = nil
     if type(result) == "table" and result.addOption then
         context = result
+    elseif preOffer and ISContextMenu then
+        context = ISContextMenu.get(player, x or 0, y or 0)
     elseif buildCorpseTrashOffer(player, worldobjects) and ISContextMenu then
         context = ISContextMenu.get(player, x or 0, y or 0)
     end
 
-    if context and addCorpseTrashOption(player, context, worldobjects, false, true) then
+    if context and addCorpseTrashOption(player, context, worldobjects, false, true, preOffer) then
         debugLog("createMenu returning forced context")
         return context
     end
