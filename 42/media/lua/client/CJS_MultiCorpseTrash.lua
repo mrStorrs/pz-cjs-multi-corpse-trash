@@ -2,10 +2,12 @@ require "ISUI/ISWorldObjectContextMenu"
 require "TimedActions/ISBaseTimedAction"
 require "TimedActions/ISGrabCorpseAction"
 require "TimedActions/ISInventoryTransferAction"
+pcall(require, "PickupCorpse/TimedActions/ISPickupCorpseAction")
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.5-debug"
+CJSMultiCorpseTrash.version = "0.1.6-debug"
 CJSMultiCorpseTrash.debug = true
+CJSMultiCorpseTrash.draggedCorpseByPlayer = CJSMultiCorpseTrash.draggedCorpseByPlayer or {}
 
 local unpackArgs = unpack or table.unpack
 
@@ -139,6 +141,60 @@ local function corpseItemForBody(body)
     local item = call(body, "getItem")
     if isCorpseItem(item) then return item end
     return nil
+end
+
+local function playerNum(playerObj)
+    return call(playerObj, "getPlayerNum") or 0
+end
+
+local function cacheDraggedCorpse(playerObj, corpse, corpseBody, source)
+    if not playerObj or not isCorpseItem(corpse) then return end
+
+    local body = corpseBody or call(corpse, "getDeadBodyObject")
+    CJSMultiCorpseTrash.draggedCorpseByPlayer[playerNum(playerObj)] = {
+        corpse = corpse,
+        corpseBody = body,
+        source = source,
+    }
+
+    debugLog(
+        "cache-dragged-corpse source="
+        .. tostring(source)
+        .. " player="
+        .. tostring(playerNum(playerObj))
+        .. " corpse="
+        .. describeItem(corpse)
+        .. " body="
+        .. describeObject(body)
+    )
+end
+
+local function cachedDraggedCorpse(playerObj)
+    if call(playerObj, "isDraggingCorpse") ~= true then return nil end
+
+    local cached = CJSMultiCorpseTrash.draggedCorpseByPlayer[playerNum(playerObj)]
+    if cached and isCorpseItem(cached.corpse) then
+        debugLog(
+            "cache-dragged-corpse hit player="
+            .. tostring(playerNum(playerObj))
+            .. " source="
+            .. tostring(cached.source)
+            .. " corpse="
+            .. describeItem(cached.corpse)
+            .. " body="
+            .. describeObject(cached.corpseBody)
+        )
+        return cached
+    end
+
+    debugLog("cache-dragged-corpse miss player=" .. tostring(playerNum(playerObj)))
+    return nil
+end
+
+local function clearCachedDraggedCorpse(playerObj)
+    if playerObj then
+        CJSMultiCorpseTrash.draggedCorpseByPlayer[playerNum(playerObj)] = nil
+    end
 end
 
 local function deadBodyOnSquare(square)
@@ -370,7 +426,9 @@ if ISGrabCorpseAction and ISGrabCorpseAction.perform and not CJSMultiCorpseTrash
     local vanillaGrabCorpsePerform = ISGrabCorpseAction.perform
     ISGrabCorpseAction.perform = function(self)
         debugLog("grab-corpse perform before corpse=" .. describeItem(self.corpse) .. " body=" .. describeObject(self.corpseBody))
+        cacheDraggedCorpse(self.character, self.corpse, self.corpseBody, "ISGrabCorpseAction.perform.before")
         local result = vanillaGrabCorpsePerform(self)
+        cacheDraggedCorpse(self.character, self.corpse, self.corpseBody, "ISGrabCorpseAction.perform.after")
         debugLog(
             "grab-corpse perform after primary="
             .. describeItem(call(self.character, "getPrimaryHandItem"))
@@ -384,6 +442,30 @@ if ISGrabCorpseAction and ISGrabCorpseAction.perform and not CJSMultiCorpseTrash
         return result
     end
     CJSMultiCorpseTrash.grabCorpseActionWrapped = true
+end
+
+if ISPickupCorpseAction and not CJSMultiCorpseTrash.pickupCorpseActionWrapped then
+    if ISPickupCorpseAction.perform then
+        local pickupPerform = ISPickupCorpseAction.perform
+        ISPickupCorpseAction.perform = function(self)
+            cacheDraggedCorpse(self.character, self.corpse, self.corpseBody, "ISPickupCorpseAction.perform.before")
+            local result = pickupPerform(self)
+            cacheDraggedCorpse(self.character, self.corpse, self.corpseBody, "ISPickupCorpseAction.perform.after")
+            return result
+        end
+    end
+
+    if ISPickupCorpseAction.complete then
+        local pickupComplete = ISPickupCorpseAction.complete
+        ISPickupCorpseAction.complete = function(self)
+            cacheDraggedCorpse(self.character, self.corpse, self.corpseBody, "ISPickupCorpseAction.complete.before")
+            local result = pickupComplete(self)
+            cacheDraggedCorpse(self.character, self.corpse, self.corpseBody, "ISPickupCorpseAction.complete.after")
+            return result
+        end
+    end
+
+    CJSMultiCorpseTrash.pickupCorpseActionWrapped = true
 end
 
 local function spriteProperties(object)
@@ -590,6 +672,118 @@ local function putCorpseInTrash(playerObj, trashCan, corpse)
     ISTimedActionQueue.add(ISInventoryTransferAction:new(playerObj, corpse, source, container))
 end
 
+CJSPutCachedCorpseInTrashAction = ISBaseTimedAction:derive("CJSPutCachedCorpseInTrashAction")
+
+function CJSPutCachedCorpseInTrashAction:isValid()
+    local container = call(self.trashCan, "getContainer")
+    if not container or not isCorpseItem(self.corpse) then
+        debugLog("cached-action invalid missing container/corpse container=" .. tostring(container) .. " corpse=" .. describeItem(self.corpse))
+        return false
+    end
+    if call(container, "isItemAllowed", self.corpse) ~= true then
+        debugLog("cached-action invalid item not allowed " .. describeItem(self.corpse))
+        return false
+    end
+    if not containerHasCapacity(container, self.character, self.corpse) then
+        debugLog("cached-action invalid no capacity " .. describeItem(self.corpse))
+        return false
+    end
+
+    local cached = CJSMultiCorpseTrash.draggedCorpseByPlayer[playerNum(self.character)]
+    local valid = call(self.character, "isDraggingCorpse") == true or (cached and cached.corpse == self.corpse)
+    debugLog("cached-action isValid valid=" .. tostring(valid) .. " corpse=" .. describeItem(self.corpse))
+    return valid
+end
+
+function CJSPutCachedCorpseInTrashAction:waitToStart()
+    self.character:faceThisObject(self.trashCan)
+    return self.character:shouldBeTurning()
+end
+
+function CJSPutCachedCorpseInTrashAction:update()
+    self.corpse:setJobDelta(self:getJobDelta())
+    self.character:faceThisObject(self.trashCan)
+    self.character:setMetabolicTarget(Metabolics.LightWork)
+end
+
+function CJSPutCachedCorpseInTrashAction:start()
+    debugLog("cached-action start trashCan=" .. describeObject(self.trashCan) .. " corpse=" .. describeItem(self.corpse) .. " body=" .. describeObject(self.corpseBody))
+    self.corpse:setJobType("Putting corpse in garbage")
+    self.corpse:setJobDelta(0.0)
+    self:setActionAnim("Loot")
+    self.character:SetVariable("LootPosition", "Low")
+    self.character:reportEvent("EventLootItem")
+end
+
+function CJSPutCachedCorpseInTrashAction:stop()
+    self.corpse:setJobDelta(0.0)
+    ISBaseTimedAction.stop(self)
+end
+
+function CJSPutCachedCorpseInTrashAction:perform()
+    local container = call(self.trashCan, "getContainer")
+    debugLog("cached-action perform container=" .. tostring(container) .. " corpse=" .. describeItem(self.corpse) .. " body=" .. describeObject(self.corpseBody))
+    if container and isCorpseItem(self.corpse) then
+        self.corpse:setJobDelta(0.0)
+
+        local source = call(self.corpse, "getContainer")
+        if source and source ~= container then
+            call(source, "Remove", self.corpse)
+        end
+
+        if isClient() and call(container, "isInCharacterInventory", self.character) ~= true then
+            call(container, "addItemOnServer", self.corpse)
+        end
+
+        if call(self.corpse, "getContainer") ~= container then
+            call(container, "AddItem", self.corpse)
+        end
+
+        local square = call(self.corpseBody, "getSquare")
+        if square then
+            square:removeCorpse(self.corpseBody, false)
+        end
+
+        clearDraggedCorpse(self.character)
+        clearCachedDraggedCorpse(self.character)
+        updateContainerAfterAdd(container, self.trashCan)
+    end
+
+    ISBaseTimedAction.perform(self)
+end
+
+function CJSPutCachedCorpseInTrashAction:new(character, trashCan, corpse, corpseBody)
+    local o = {}
+    setmetatable(o, self)
+    self.__index = self
+    o.character = character
+    o.trashCan = trashCan
+    o.corpse = corpse
+    o.corpseBody = corpseBody or call(corpse, "getDeadBodyObject")
+    o.stopOnWalk = true
+    o.stopOnRun = true
+    o.maxTime = 50
+    o.forceProgressBar = true
+    if character:isTimedActionInstant() then
+        o.maxTime = 1
+    end
+    return o
+end
+
+local function putCachedDraggedCorpseInTrash(playerObj, trashCan, corpse, corpseBody)
+    if not playerObj or not trashCan or not isCorpseItem(corpse) then return end
+
+    local container = call(trashCan, "getContainer")
+    if not container then return end
+    if call(container, "isItemAllowed", corpse) ~= true then return end
+
+    if luautils and luautils.walkAdj then
+        if not luautils.walkAdj(playerObj, call(trashCan, "getSquare"), true) then return end
+    end
+
+    ISTimedActionQueue.add(CJSPutCachedCorpseInTrashAction:new(playerObj, trashCan, corpse, corpseBody))
+end
+
 CJSPutDraggedCorpseInTrashAction = ISBaseTimedAction:derive("CJSPutDraggedCorpseInTrashAction")
 
 function CJSPutDraggedCorpseInTrashAction:isValid()
@@ -729,12 +923,26 @@ local function buildCorpseTrashOffer(player, worldobjects, dragState)
     end
 
     local corpseBody = draggedCorpseBody(playerObj, dragState)
-    local corpse = corpseItemForBody(corpseBody) or carriedCorpse(playerObj)
+    local corpse = corpseItemForBody(corpseBody)
+    local cachedCorpse = nil
+
+    if not corpse then
+        cachedCorpse = cachedDraggedCorpse(playerObj)
+        if cachedCorpse then
+            corpse = cachedCorpse.corpse
+            corpseBody = corpseBody or cachedCorpse.corpseBody
+        end
+    end
+
+    if not corpse then
+        corpse = carriedCorpse(playerObj)
+    end
+
     if not corpse then
         debugLog("offer fail no corpse corpseBody=" .. describeObject(corpseBody))
         return
     end
-    debugLog("offer corpse body=" .. describeObject(corpseBody) .. " corpseItem=" .. describeItem(corpse))
+    debugLog("offer corpse body=" .. describeObject(corpseBody) .. " corpseItem=" .. describeItem(corpse) .. " cached=" .. tostring(cachedCorpse ~= nil))
 
     local trashCan = findTrashCan(worldobjects, playerObj)
     if not trashCan then
@@ -758,6 +966,7 @@ local function buildCorpseTrashOffer(player, worldobjects, dragState)
         playerObj = playerObj,
         corpse = corpse,
         corpseBody = corpseBody,
+        cachedCorpse = cachedCorpse,
         trashCan = trashCan,
         container = container,
         dragState = dragState,
@@ -782,7 +991,9 @@ local function addCorpseTrashOption(player, context, worldobjects, test, forceVi
     end
 
     local option
-    if offer.corpseBody then
+    if offer.cachedCorpse then
+        option = context:addOption(optionName, offer.playerObj, putCachedDraggedCorpseInTrash, offer.trashCan, offer.corpse, offer.corpseBody)
+    elseif offer.corpseBody then
         option = context:addOption(optionName, offer.playerObj, putDraggedCorpseInTrash, offer.trashCan, offer.corpseBody, offer.dragState)
     else
         option = context:addOption(optionName, offer.playerObj, putCorpseInTrash, offer.trashCan, offer.corpse)
