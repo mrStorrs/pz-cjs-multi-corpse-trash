@@ -3,7 +3,8 @@ require "TimedActions/ISBaseTimedAction"
 require "TimedActions/ISInventoryTransferAction"
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.2"
+CJSMultiCorpseTrash.version = "0.1.3-debug"
+CJSMultiCorpseTrash.debug = true
 
 local unpackArgs = unpack or table.unpack
 
@@ -21,7 +22,10 @@ local trashNameTokens = {
 local function call(object, methodName, ...)
     if not object then return nil end
 
-    local method = object[methodName]
+    local okMethod, method = pcall(function()
+        return object[methodName]
+    end)
+    if not okMethod then return nil end
     if not method then return nil end
 
     local args = { ... }
@@ -40,6 +44,60 @@ end
 
 local function hasText(value)
     return value ~= nil and value ~= false and tostring(value) ~= ""
+end
+
+local function debugLog(message)
+    if CJSMultiCorpseTrash.debug then
+        print("[cjsMultiCorpseTrash] " .. tostring(message))
+    end
+end
+
+local function sizeOf(list)
+    if not list then return 0 end
+
+    local result = tonumber(call(list, "size"))
+    if result then return result end
+
+    local ok, result = pcall(function()
+        return #list
+    end)
+    if ok and result then return result end
+
+    return 0
+end
+
+local function describeSquare(square)
+    if not square then return "nil" end
+    return tostring(call(square, "getX")) .. "," .. tostring(call(square, "getY")) .. "," .. tostring(call(square, "getZ"))
+end
+
+local function describeObject(object)
+    if not object then return "nil" end
+
+    local className = nil
+    local class = call(object, "getClass")
+    if class then
+        className = call(class, "getName")
+    end
+
+    local parts = {
+        tostring(object),
+        "class=" .. tostring(className),
+        "objectName=" .. tostring(call(object, "getObjectName")),
+        "name=" .. tostring(call(object, "getName")),
+        "type=" .. tostring(call(object, "getType")),
+        "square=" .. describeSquare(call(object, "getSquare") or call(object, "getCurrentSquare")),
+    }
+
+    return table.concat(parts, " ")
+end
+
+local function describeItem(item)
+    if not item then return "nil" end
+    return tostring(item)
+        .. " type=" .. tostring(call(item, "getType"))
+        .. " fullType=" .. tostring(call(item, "getFullType"))
+        .. " name=" .. tostring(call(item, "getName"))
 end
 
 local function isCorpseItem(item)
@@ -115,15 +173,37 @@ local function deadBodyFromCandidate(object)
 end
 
 local function draggedCorpseBody(playerObj)
-    if call(playerObj, "isDraggingCorpse") ~= true then return nil end
+    local hasDraggingMethod = call(playerObj, "isDraggingCorpse") ~= nil
+    local draggingValue = call(playerObj, "isDraggingCorpse")
+    local dragObject = call(playerObj, "getDragObject")
+    local dragCharacter = call(playerObj, "getDragCharacter")
 
-    local corpseBody = deadBodyFromCandidate(call(playerObj, "getDragObject"))
-    if corpseBody then return corpseBody end
+    debugLog(
+        "corpse-detect start hasIsDraggingCorpse="
+        .. tostring(hasDraggingMethod)
+        .. " isDraggingCorpse="
+        .. tostring(draggingValue)
+        .. " dragObject="
+        .. describeObject(dragObject)
+        .. " dragCharacter="
+        .. describeObject(dragCharacter)
+    )
 
-    corpseBody = deadBodyFromCandidate(call(playerObj, "getDragCharacter"))
-    if corpseBody then return corpseBody end
+    local corpseBody = deadBodyFromCandidate(dragObject)
+    if corpseBody then
+        debugLog("corpse-detect hit getDragObject " .. describeObject(corpseBody))
+        return corpseBody
+    end
 
-    return scanAroundForDeadBody(call(playerObj, "getCurrentSquare"))
+    corpseBody = deadBodyFromCandidate(dragCharacter)
+    if corpseBody then
+        debugLog("corpse-detect hit getDragCharacter " .. describeObject(corpseBody))
+        return corpseBody
+    end
+
+    corpseBody = scanAroundForDeadBody(call(playerObj, "getCurrentSquare"))
+    debugLog("corpse-detect adjacent result " .. describeObject(corpseBody))
+    return corpseBody
 end
 
 local function clearDraggedCorpse(playerObj)
@@ -270,14 +350,32 @@ local function findTrashCan(worldobjects, playerObj)
 
     for _, object in ipairs(worldobjects or {}) do
         local trashCan = scan(call(object, "getSquare"))
-        if trashCan then return trashCan end
+        if trashCan then
+            debugLog("trash-detect hit worldobjects " .. describeObject(trashCan))
+            return trashCan
+        end
     end
 
     local fetch = ISWorldObjectContextMenu and ISWorldObjectContextMenu.fetchVars
     local trashCan = scanAround(fetch and fetch.clickedSquare, scan)
-    if trashCan then return trashCan end
+    if trashCan then
+        debugLog("trash-detect hit clickedSquare " .. describeObject(trashCan))
+        return trashCan
+    end
 
-    return scanAround(call(playerObj, "getCurrentSquare"), scan)
+    trashCan = scanAround(call(playerObj, "getCurrentSquare"), scan)
+    if trashCan then
+        debugLog("trash-detect hit player-adjacent " .. describeObject(trashCan))
+    else
+        debugLog(
+            "trash-detect miss worldobjects="
+            .. tostring(sizeOf(worldobjects))
+            .. " playerSquare="
+            .. describeSquare(call(playerObj, "getCurrentSquare"))
+        )
+    end
+
+    return trashCan
 end
 
 local function addTooltip(option, name, description)
@@ -337,11 +435,23 @@ CJSPutDraggedCorpseInTrashAction = ISBaseTimedAction:derive("CJSPutDraggedCorpse
 function CJSPutDraggedCorpseInTrashAction:isValid()
     local container = call(self.trashCan, "getContainer")
     local corpse = corpseItemForBody(self.corpseBody)
-    if not container or not corpse then return false end
-    if call(container, "isItemAllowed", corpse) ~= true then return false end
-    if not containerHasCapacity(container, self.character, corpse) then return false end
+    if not container or not corpse then
+        debugLog("action invalid missing container/corpse container=" .. tostring(container) .. " corpse=" .. describeItem(corpse))
+        return false
+    end
+    if call(container, "isItemAllowed", corpse) ~= true then
+        debugLog("action invalid item not allowed " .. describeItem(corpse))
+        return false
+    end
+    if not containerHasCapacity(container, self.character, corpse) then
+        debugLog("action invalid no capacity " .. describeItem(corpse))
+        return false
+    end
 
-    return draggedCorpseBody(self.character) == self.corpseBody
+    local activeCorpse = draggedCorpseBody(self.character)
+    local valid = activeCorpse == self.corpseBody
+    debugLog("action isValid active=" .. describeObject(activeCorpse) .. " expected=" .. describeObject(self.corpseBody) .. " valid=" .. tostring(valid))
+    return valid
 end
 
 function CJSPutDraggedCorpseInTrashAction:waitToStart()
@@ -358,6 +468,8 @@ function CJSPutDraggedCorpseInTrashAction:update()
 end
 
 function CJSPutDraggedCorpseInTrashAction:start()
+    debugLog("action start trashCan=" .. describeObject(self.trashCan) .. " corpseBody=" .. describeObject(self.corpseBody))
+
     local corpse = corpseItemForBody(self.corpseBody)
     if corpse then
         corpse:setJobType("Putting corpse in garbage")
@@ -378,6 +490,7 @@ end
 function CJSPutDraggedCorpseInTrashAction:perform()
     local container = call(self.trashCan, "getContainer")
     local corpse = corpseItemForBody(self.corpseBody)
+    debugLog("action perform container=" .. tostring(container) .. " corpse=" .. describeItem(corpse) .. " body=" .. describeObject(self.corpseBody))
     if container and corpse then
         corpse:setJobDelta(0.0)
 
@@ -444,17 +557,41 @@ end
 
 local function buildCorpseTrashOffer(player, worldobjects)
     local playerObj = getSpecificPlayer(player)
-    if not playerObj or call(playerObj, "getVehicle") then return end
+    debugLog("offer start player=" .. tostring(player) .. " worldobjects=" .. tostring(sizeOf(worldobjects)) .. " playerObj=" .. tostring(playerObj))
+    if not playerObj then
+        debugLog("offer fail no playerObj")
+        return
+    end
+    if call(playerObj, "getVehicle") then
+        debugLog("offer fail player in vehicle")
+        return
+    end
 
     local corpseBody = draggedCorpseBody(playerObj)
     local corpse = corpseItemForBody(corpseBody) or carriedCorpse(playerObj)
-    if not corpse then return end
+    if not corpse then
+        debugLog("offer fail no corpse corpseBody=" .. describeObject(corpseBody))
+        return
+    end
+    debugLog("offer corpse body=" .. describeObject(corpseBody) .. " corpseItem=" .. describeItem(corpse))
 
     local trashCan = findTrashCan(worldobjects, playerObj)
-    if not trashCan then return end
+    if not trashCan then
+        debugLog("offer fail no trash can")
+        return
+    end
 
     local container = call(trashCan, "getContainer")
-    if not container or call(container, "isItemAllowed", corpse) ~= true then return end
+    if not container then
+        debugLog("offer fail trash can has no container " .. describeObject(trashCan))
+        return
+    end
+    if call(container, "isItemAllowed", corpse) ~= true then
+        debugLog("offer fail corpse not allowed container=" .. tostring(container) .. " corpse=" .. describeItem(corpse))
+        return
+    end
+
+    debugLog("offer success trashCan=" .. describeObject(trashCan) .. " container=" .. tostring(container))
 
     return {
         playerObj = playerObj,
@@ -466,6 +603,7 @@ local function buildCorpseTrashOffer(player, worldobjects)
 end
 
 local function addCorpseTrashOption(player, context, worldobjects, test, forceVisible)
+    debugLog("add-option start test=" .. tostring(test) .. " forceVisible=" .. tostring(forceVisible) .. " context=" .. tostring(context))
     if test and ISWorldObjectContextMenu.Test then return true end
 
     local offer = buildCorpseTrashOffer(player, worldobjects)
@@ -477,6 +615,7 @@ local function addCorpseTrashOption(player, context, worldobjects, test, forceVi
     local optionName = "Put Corpse in Garbage"
     if context:getOptionFromName(optionName) then
         if forceVisible then context:setVisible(true) end
+        debugLog("add-option skipped duplicate")
         return true
     end
 
@@ -493,10 +632,12 @@ local function addCorpseTrashOption(player, context, worldobjects, test, forceVi
     end
 
     if forceVisible then context:setVisible(true) end
+    debugLog("add-option success option=" .. optionName .. " notAvailable=" .. tostring(option and option.notAvailable))
     return true
 end
 
 local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
+    debugLog("event OnFillWorldObjectContextMenu player=" .. tostring(player) .. " test=" .. tostring(test) .. " worldobjects=" .. tostring(sizeOf(worldobjects)))
     return addCorpseTrashOption(player, context, worldobjects, test, false)
 end
 
@@ -504,7 +645,9 @@ Events.OnFillWorldObjectContextMenu.Add(onFillWorldObjectContextMenu)
 
 local vanillaCreateMenu = ISWorldObjectContextMenu.createMenu
 ISWorldObjectContextMenu.createMenu = function(player, worldobjects, x, y, test)
+    debugLog("createMenu wrapper start player=" .. tostring(player) .. " test=" .. tostring(test) .. " x=" .. tostring(x) .. " y=" .. tostring(y) .. " worldobjects=" .. tostring(sizeOf(worldobjects)))
     local result = vanillaCreateMenu(player, worldobjects, x, y, test)
+    debugLog("createMenu vanilla result=" .. tostring(result))
 
     if test then
         if result then return result end
@@ -520,10 +663,44 @@ ISWorldObjectContextMenu.createMenu = function(player, worldobjects, x, y, test)
     end
 
     if context and addCorpseTrashOption(player, context, worldobjects, false, true) then
+        debugLog("createMenu returning forced context")
         return context
     end
 
+    debugLog("createMenu returning vanilla result")
     return result
 end
+
+local debugUpdateCounter = 0
+Events.OnPlayerUpdate.Add(function(playerObj)
+    if not CJSMultiCorpseTrash.debug then return end
+    if not playerObj then return end
+    local isLocalPlayer = call(playerObj, "isLocalPlayer")
+    if isLocalPlayer == false then return end
+
+    debugUpdateCounter = debugUpdateCounter + 1
+    if debugUpdateCounter % 120 ~= 0 then return end
+
+    local square = call(playerObj, "getCurrentSquare")
+    local body = scanAroundForDeadBody(square)
+    local trashCan = scanAround(square, scanSquareForTrashCan)
+    local dragObject = call(playerObj, "getDragObject")
+    local dragCharacter = call(playerObj, "getDragCharacter")
+
+    if body or trashCan or dragObject or dragCharacter then
+        debugLog(
+            "tick playerSquare="
+            .. describeSquare(square)
+            .. " body="
+            .. describeObject(body)
+            .. " trashCan="
+            .. describeObject(trashCan)
+            .. " dragObject="
+            .. describeObject(dragObject)
+            .. " dragCharacter="
+            .. describeObject(dragCharacter)
+        )
+    end
+end)
 
 print("[cjsMultiCorpseTrash] Loaded client " .. CJSMultiCorpseTrash.version)
