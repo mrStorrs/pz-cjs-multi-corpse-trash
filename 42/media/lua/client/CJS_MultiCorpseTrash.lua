@@ -5,7 +5,7 @@ require "TimedActions/ISInventoryTransferAction"
 pcall(require, "PickupCorpse/TimedActions/ISPickupCorpseAction")
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.7"
+CJSMultiCorpseTrash.version = "0.1.8"
 CJSMultiCorpseTrash.draggedCorpseByPlayer = CJSMultiCorpseTrash.draggedCorpseByPlayer or {}
 
 local unpackArgs = unpack or table.unpack
@@ -25,8 +25,14 @@ local trashNameTokens = {
     "wheelie bin",
 }
 
+local function isObjectLike(object)
+    local objectType = type(object)
+    return objectType == "table" or objectType == "userdata"
+end
+
 local function call(object, methodName, ...)
     if not object then return nil end
+    if not isObjectLike(object) then return nil end
 
     local okMethod, method = pcall(function()
         return object[methodName]
@@ -66,10 +72,18 @@ local function option(key)
     return defaults[key]
 end
 
+local function isDebugLoggingEnabled()
+    return option("DebugLogging") == true
+end
+
 local function debugLog(message)
-    if option("DebugLogging") then
-        print("[cjsMultiCorpseTrash] " .. tostring(message))
+    if not isDebugLoggingEnabled() then return end
+
+    if type(message) == "function" then
+        message = message()
     end
+
+    print("[cjsMultiCorpseTrash] " .. tostring(message))
 end
 
 local function sizeOf(list)
@@ -317,7 +331,9 @@ end
 local function activeCellDrag(player)
     local cell = getCell and getCell()
     local dragState = call(cell, "getDrag", player)
-    debugLog("cell-drag player=" .. tostring(player) .. " drag=" .. describeDragState(dragState))
+    debugLog(function()
+        return "cell-drag player=" .. tostring(player) .. " drag=" .. describeDragState(dragState)
+    end)
     return dragState
 end
 
@@ -355,7 +371,9 @@ local function deadBodyFromDragState(dragState)
         return body
     end
 
-    debugLog("corpse-detect no body in cell-drag " .. describeDragState(dragState))
+    debugLog(function()
+        return "corpse-detect no body in cell-drag " .. describeDragState(dragState)
+    end)
     return nil
 end
 
@@ -928,7 +946,16 @@ end
 
 local function buildCorpseTrashOffer(player, worldobjects, dragState)
     local playerObj = getSpecificPlayer(player)
-    debugLog("offer start player=" .. tostring(player) .. " worldobjects=" .. tostring(sizeOf(worldobjects)) .. " playerObj=" .. tostring(playerObj) .. " dragState=" .. describeDragState(dragState))
+    debugLog(function()
+        return "offer start player="
+            .. tostring(player)
+            .. " worldobjects="
+            .. tostring(sizeOf(worldobjects))
+            .. " playerObj="
+            .. tostring(playerObj)
+            .. " dragState="
+            .. describeDragState(dragState)
+    end)
     if not playerObj then
         debugLog("offer fail no playerObj")
         return

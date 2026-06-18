@@ -6,4 +6,4 @@ This mod does not change trash-can capacity; pair it with a storage-capacity mod
 
 Version 0.1.2 wraps the vanilla world-context menu creation so the action can still appear while a corpse is being dragged and vanilla returns before late mod hooks run.
 
-Version 0.1.7 keeps the working dropped-corpse trash action and moves diagnostic logging behind the **Debug Logging** sandbox option, which defaults off.
+Version 0.1.8 avoids building drag-state diagnostics unless debug logging is enabled, preventing random right-clicks from producing Lua stack traces.
