@@ -5,7 +5,7 @@ require "TimedActions/ISInventoryTransferAction"
 pcall(require, "PickupCorpse/TimedActions/ISPickupCorpseAction")
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.8"
+CJSMultiCorpseTrash.version = "0.1.9"
 CJSMultiCorpseTrash.draggedCorpseByPlayer = CJSMultiCorpseTrash.draggedCorpseByPlayer or {}
 
 local unpackArgs = unpack or table.unpack
@@ -23,6 +23,13 @@ local trashNameTokens = {
     "trash can",
     "wheeliebin",
     "wheelie bin",
+}
+
+local zuperCartItemTypes = {
+    ["TMC.CartContainer"] = true,
+    ["TMC.CartContainer2"] = true,
+    ["TMC.TrolleyContainer"] = true,
+    ["TMC.TrolleyContainer2"] = true,
 }
 
 local function isObjectLike(object)
@@ -555,12 +562,42 @@ local function containsTrashName(value)
     return false
 end
 
-local function isTrashCanObject(object)
-    if not object then return false end
-    if instanceof and instanceof(object, "IsoWorldInventoryObject") then return false end
+local function worldInventoryItem(object)
+    if not object then return nil end
+    if instanceof and not instanceof(object, "IsoWorldInventoryObject") then return nil end
+    return call(object, "getItem")
+end
+
+local function isZuperCartItem(item)
+    local fullType = call(item, "getFullType")
+    return fullType ~= nil and zuperCartItemTypes[tostring(fullType)] == true
+end
+
+local function isZuperCartObject(object)
+    return isZuperCartItem(worldInventoryItem(object))
+end
+
+local function targetContainerForObject(object)
+    local item = worldInventoryItem(object)
+    if isZuperCartItem(item) then
+        local container = call(item, "getInventory")
+        if container then return container end
+    end
 
     local container = call(object, "getContainer")
+    if container then return container end
+
+    return nil
+end
+
+local function isTrashCanObject(object)
+    if not object then return false end
+
+    local container = targetContainerForObject(object)
     if not container then return false end
+
+    if isZuperCartObject(object) then return true end
+    if instanceof and instanceof(object, "IsoWorldInventoryObject") then return false end
 
     if propertyIs(object, "IsTrashCan") then return true end
     if containsTrashName(objectDisplayName(object)) then return true end
@@ -569,23 +606,29 @@ local function isTrashCanObject(object)
     return false
 end
 
-local function squareKey(square)
-    if not square then return nil end
-    return tostring(call(square, "getX")) .. ":" .. tostring(call(square, "getY")) .. ":" .. tostring(call(square, "getZ"))
-end
-
-local function scanSquareForTrashCan(square)
-    local objects = call(square, "getObjects")
+local function scanObjectListForTrashCan(objects)
     if not objects then return nil end
 
-    for index = objects:size() - 1, 0, -1 do
-        local object = objects:get(index)
+    for index = sizeOf(objects) - 1, 0, -1 do
+        local object = call(objects, "get", index)
         if isTrashCanObject(object) then
             return object
         end
     end
 
     return nil
+end
+
+local function squareKey(square)
+    if not square then return nil end
+    return tostring(call(square, "getX")) .. ":" .. tostring(call(square, "getY")) .. ":" .. tostring(call(square, "getZ"))
+end
+
+local function scanSquareForTrashCan(square)
+    local trashCan = scanObjectListForTrashCan(call(square, "getObjects"))
+    if trashCan then return trashCan end
+
+    return scanObjectListForTrashCan(call(square, "getWorldObjects"))
 end
 
 local function scanAround(square, scan)
@@ -625,6 +668,11 @@ local function findTrashCan(worldobjects, playerObj)
     end
 
     for _, object in ipairs(worldobjects or {}) do
+        if isTrashCanObject(object) then
+            debugLog("trash-detect hit worldobject " .. describeObject(object))
+            return object
+        end
+
         local trashCan = scan(call(object, "getSquare"))
         if trashCan then
             debugLog("trash-detect hit worldobjects " .. describeObject(trashCan))
@@ -691,7 +739,7 @@ end
 local function putCorpseInTrash(playerObj, trashCan, corpse)
     if not playerObj or not trashCan or not isCorpseItem(corpse) then return end
 
-    local container = call(trashCan, "getContainer")
+    local container = targetContainerForObject(trashCan)
     local source = call(corpse, "getContainer")
     if not container or not source then return end
     if call(container, "isItemAllowed", corpse) ~= true then return end
@@ -709,7 +757,7 @@ end
 CJSPutCachedCorpseInTrashAction = ISBaseTimedAction:derive("CJSPutCachedCorpseInTrashAction")
 
 function CJSPutCachedCorpseInTrashAction:isValid()
-    local container = call(self.trashCan, "getContainer")
+    local container = targetContainerForObject(self.trashCan)
     if not container or not isCorpseItem(self.corpse) then
         debugLog("cached-action invalid missing container/corpse container=" .. tostring(container) .. " corpse=" .. describeItem(self.corpse))
         return false
@@ -755,7 +803,7 @@ function CJSPutCachedCorpseInTrashAction:stop()
 end
 
 function CJSPutCachedCorpseInTrashAction:perform()
-    local container = call(self.trashCan, "getContainer")
+    local container = targetContainerForObject(self.trashCan)
     debugLog("cached-action perform container=" .. tostring(container) .. " corpse=" .. describeItem(self.corpse) .. " body=" .. describeObject(self.corpseBody))
     if container and isCorpseItem(self.corpse) then
         self.corpse:setJobDelta(0.0)
@@ -807,7 +855,7 @@ end
 local function putCachedDraggedCorpseInTrash(playerObj, trashCan, corpse, corpseBody)
     if not playerObj or not trashCan or not isCorpseItem(corpse) then return end
 
-    local container = call(trashCan, "getContainer")
+    local container = targetContainerForObject(trashCan)
     if not container then return end
     if call(container, "isItemAllowed", corpse) ~= true then return end
 
@@ -821,7 +869,7 @@ end
 CJSPutDraggedCorpseInTrashAction = ISBaseTimedAction:derive("CJSPutDraggedCorpseInTrashAction")
 
 function CJSPutDraggedCorpseInTrashAction:isValid()
-    local container = call(self.trashCan, "getContainer")
+    local container = targetContainerForObject(self.trashCan)
     local corpse = corpseItemForBody(self.corpseBody)
     if not container or not corpse then
         debugLog("action invalid missing container/corpse container=" .. tostring(container) .. " corpse=" .. describeItem(corpse))
@@ -876,7 +924,7 @@ function CJSPutDraggedCorpseInTrashAction:stop()
 end
 
 function CJSPutDraggedCorpseInTrashAction:perform()
-    local container = call(self.trashCan, "getContainer")
+    local container = targetContainerForObject(self.trashCan)
     local corpse = corpseItemForBody(self.corpseBody)
     debugLog("action perform container=" .. tostring(container) .. " corpse=" .. describeItem(corpse) .. " body=" .. describeObject(self.corpseBody))
     if container and corpse then
@@ -924,7 +972,7 @@ end
 local function putDraggedCorpseInTrash(playerObj, trashCan, corpseBody, dragState)
     if not playerObj or not trashCan or not isDeadBody(corpseBody) then return end
 
-    local container = call(trashCan, "getContainer")
+    local container = targetContainerForObject(trashCan)
     local corpse = corpseItemForBody(corpseBody)
     if not container or not corpse then return end
     if call(container, "isItemAllowed", corpse) ~= true then return end
@@ -993,9 +1041,9 @@ local function buildCorpseTrashOffer(player, worldobjects, dragState)
         return
     end
 
-    local container = call(trashCan, "getContainer")
+    local container = targetContainerForObject(trashCan)
     if not container then
-        debugLog("offer fail trash can has no container " .. describeObject(trashCan))
+        debugLog("offer fail target has no container " .. describeObject(trashCan))
         return
     end
     if call(container, "isItemAllowed", corpse) ~= true then
@@ -1027,6 +1075,9 @@ local function addCorpseTrashOption(player, context, worldobjects, test, forceVi
     if not context then return false end
 
     local optionName = "Put Corpse in Garbage"
+    if isZuperCartObject(offer.trashCan) then
+        optionName = "Put Corpse in Cart/Trolley"
+    end
     if context:getOptionFromName(optionName) then
         if forceVisible then context:setVisible(true) end
         debugLog("add-option skipped duplicate")
@@ -1044,7 +1095,11 @@ local function addCorpseTrashOption(player, context, worldobjects, test, forceVi
 
     if not containerHasCapacity(offer.container, offer.playerObj, offer.corpse) then
         option.notAvailable = true
-        addTooltip(option, optionName, "This trash can does not have room for the corpse.")
+        local capacityDescription = "This trash can does not have room for the corpse."
+        if isZuperCartObject(offer.trashCan) then
+            capacityDescription = "This cart/trolley does not have room for the corpse."
+        end
+        addTooltip(option, optionName, capacityDescription)
     end
 
     if forceVisible then context:setVisible(true) end
