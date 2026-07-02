@@ -519,24 +519,15 @@ local function propertyIs(object, name)
     local props = spriteProperties(object)
     if not props then return false end
 
-    local ok, result = pcall(function()
-        return props:Is(name)
-    end)
-
-    return ok and result == true
+    return props:has(name) == true
 end
 
 local function propertyValue(object, name)
     local props = spriteProperties(object)
     if not props then return nil end
 
-    local ok, result = pcall(function()
-        if not props:Is(name) then return nil end
-        return props:Val(name)
-    end)
-
-    if ok then return result end
-    return nil
+    if not props:has(name) then return nil end
+    return props:get(name)
 end
 
 local function objectDisplayName(object)
