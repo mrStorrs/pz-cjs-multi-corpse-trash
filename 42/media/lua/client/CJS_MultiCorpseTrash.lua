@@ -5,7 +5,7 @@ require "TimedActions/ISInventoryTransferAction"
 pcall(require, "PickupCorpse/TimedActions/ISPickupCorpseAction")
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.9"
+CJSMultiCorpseTrash.version = "0.1.10"
 CJSMultiCorpseTrash.draggedCorpseByPlayer = CJSMultiCorpseTrash.draggedCorpseByPlayer or {}
 
 local unpackArgs = unpack or table.unpack
@@ -718,6 +718,83 @@ local function containerHasCapacity(container, playerObj, item)
     return contentsWeight + itemWeight <= capacity
 end
 
+local function canStoreCorpse(container, playerObj, corpse)
+    return container
+        and isCorpseItem(corpse)
+        and call(container, "isItemAllowed", corpse) == true
+        and containerHasCapacity(container, playerObj, corpse)
+end
+
+local function storableDeadBodyFromCandidate(object, container, playerObj, skipBody)
+    local body = deadBodyFromCandidate(object)
+    if not body or body == skipBody then return nil end
+
+    local corpse = corpseItemForBody(body)
+    if canStoreCorpse(container, playerObj, corpse) then return body end
+    return nil
+end
+
+local function storableDeadBodyOnSquare(square, container, playerObj, skipBody)
+    if not square then return nil end
+
+    local body = storableDeadBodyFromCandidate(call(square, "getDeadBody"), container, playerObj, skipBody)
+    if body then return body end
+
+    local movingObjects = call(square, "getStaticMovingObjects")
+    for index = 0, sizeOf(movingObjects) - 1 do
+        body = storableDeadBodyFromCandidate(call(movingObjects, "get", index), container, playerObj, skipBody)
+        if body then return body end
+    end
+
+    return nil
+end
+
+local function scanAroundForStorableDeadBody(square, container, playerObj, skipBody, checked)
+    if not square then return nil end
+
+    local key = squareKey(square)
+    if key and checked and checked[key] then return nil end
+    if key and checked then checked[key] = true end
+
+    local body = storableDeadBodyOnSquare(square, container, playerObj, skipBody)
+    if body then return body end
+
+    local cell = getCell and getCell()
+    if not cell then return nil end
+
+    local x = call(square, "getX")
+    local y = call(square, "getY")
+    local z = call(square, "getZ")
+    if x == nil or y == nil or z == nil then return nil end
+
+    for dx = -1, 1 do
+        for dy = -1, 1 do
+            if dx ~= 0 or dy ~= 0 then
+                local nearbySquare = call(cell, "getGridSquare", x + dx, y + dy, z)
+                key = squareKey(nearbySquare)
+                if not key or not checked or not checked[key] then
+                    if key and checked then checked[key] = true end
+                    body = storableDeadBodyOnSquare(nearbySquare, container, playerObj, skipBody)
+                    if body then return body end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function nextNearbyCorpseBody(playerObj, trashCan, skipBody)
+    local container = targetContainerForObject(trashCan)
+    if not container then return nil end
+
+    local checked = {}
+    local body = scanAroundForStorableDeadBody(call(trashCan, "getSquare"), container, playerObj, skipBody, checked)
+    if body then return body end
+
+    return scanAroundForStorableDeadBody(call(playerObj, "getCurrentSquare"), container, playerObj, skipBody, checked)
+end
+
 local function updateContainerAfterAdd(container, trashCan)
     call(container, "setDrawDirty", true)
     call(container, "setHasBeenLooted", true)
@@ -727,13 +804,15 @@ local function updateContainerAfterAdd(container, trashCan)
     end
 end
 
+local queueNextNearbyCorpseInTrash
+
 local function putCorpseInTrash(playerObj, trashCan, corpse)
     if not playerObj or not trashCan or not isCorpseItem(corpse) then return end
 
     local container = targetContainerForObject(trashCan)
     local source = call(corpse, "getContainer")
     if not container or not source then return end
-    if call(container, "isItemAllowed", corpse) ~= true then return end
+    if not canStoreCorpse(container, playerObj, corpse) then return end
 
     local playerNum = call(playerObj, "getPlayerNum") or 0
     if luautils and luautils.walkToContainer then
@@ -743,6 +822,9 @@ local function putCorpseInTrash(playerObj, trashCan, corpse)
     end
 
     ISTimedActionQueue.add(ISInventoryTransferAction:new(playerObj, corpse, source, container))
+    if CJSPutNextNearbyCorpseInTrashAction then
+        ISTimedActionQueue.add(CJSPutNextNearbyCorpseInTrashAction:new(playerObj, trashCan))
+    end
 end
 
 CJSPutCachedCorpseInTrashAction = ISBaseTimedAction:derive("CJSPutCachedCorpseInTrashAction")
@@ -795,6 +877,7 @@ end
 
 function CJSPutCachedCorpseInTrashAction:perform()
     local container = targetContainerForObject(self.trashCan)
+    local stored = false
     debugLog("cached-action perform container=" .. tostring(container) .. " corpse=" .. describeItem(self.corpse) .. " body=" .. describeObject(self.corpseBody))
     if container and isCorpseItem(self.corpse) then
         self.corpse:setJobDelta(0.0)
@@ -820,16 +903,18 @@ function CJSPutCachedCorpseInTrashAction:perform()
         clearDraggedCorpse(self.character)
         clearCachedDraggedCorpse(self.character)
         updateContainerAfterAdd(container, self.trashCan)
+        stored = true
+    end
+
+    if stored and queueNextNearbyCorpseInTrash then
+        queueNextNearbyCorpseInTrash(self.character, self.trashCan, self.corpseBody)
     end
 
     ISBaseTimedAction.perform(self)
 end
 
 function CJSPutCachedCorpseInTrashAction:new(character, trashCan, corpse, corpseBody)
-    local o = {}
-    setmetatable(o, self)
-    self.__index = self
-    o.character = character
+    local o = ISBaseTimedAction.new(self, character)
     o.trashCan = trashCan
     o.corpse = corpse
     o.corpseBody = corpseBody or call(corpse, "getDeadBodyObject")
@@ -875,6 +960,12 @@ function CJSPutDraggedCorpseInTrashAction:isValid()
         return false
     end
 
+    if self.allowGroundCorpse then
+        local valid = isDeadBody(self.corpseBody) and call(self.corpseBody, "getSquare") ~= nil
+        debugLog("action isValid repeat=true body=" .. describeObject(self.corpseBody) .. " valid=" .. tostring(valid))
+        return valid
+    end
+
     local activeCorpse = draggedCorpseBody(self.character, self.dragState)
     local valid = activeCorpse == self.corpseBody or (self.dragState ~= nil and isDeadBody(self.corpseBody))
     debugLog("action isValid active=" .. describeObject(activeCorpse) .. " expected=" .. describeObject(self.corpseBody) .. " valid=" .. tostring(valid))
@@ -917,6 +1008,7 @@ end
 function CJSPutDraggedCorpseInTrashAction:perform()
     local container = targetContainerForObject(self.trashCan)
     local corpse = corpseItemForBody(self.corpseBody)
+    local stored = false
     debugLog("action perform container=" .. tostring(container) .. " corpse=" .. describeItem(corpse) .. " body=" .. describeObject(self.corpseBody))
     if container and corpse then
         corpse:setJobDelta(0.0)
@@ -937,19 +1029,22 @@ function CJSPutDraggedCorpseInTrashAction:perform()
 
         clearDraggedCorpse(self.character)
         updateContainerAfterAdd(container, self.trashCan)
+        stored = true
+    end
+
+    if stored and queueNextNearbyCorpseInTrash then
+        queueNextNearbyCorpseInTrash(self.character, self.trashCan, self.corpseBody)
     end
 
     ISBaseTimedAction.perform(self)
 end
 
-function CJSPutDraggedCorpseInTrashAction:new(character, trashCan, corpseBody, dragState)
-    local o = {}
-    setmetatable(o, self)
-    self.__index = self
-    o.character = character
+function CJSPutDraggedCorpseInTrashAction:new(character, trashCan, corpseBody, dragState, allowGroundCorpse)
+    local o = ISBaseTimedAction.new(self, character)
     o.trashCan = trashCan
     o.corpseBody = corpseBody
     o.dragState = dragState
+    o.allowGroundCorpse = allowGroundCorpse == true
     o.stopOnWalk = true
     o.stopOnRun = true
     o.maxTime = 50
@@ -957,6 +1052,42 @@ function CJSPutDraggedCorpseInTrashAction:new(character, trashCan, corpseBody, d
     if character:isTimedActionInstant() then
         o.maxTime = 1
     end
+    return o
+end
+
+function queueNextNearbyCorpseInTrash(playerObj, trashCan, previousBody)
+    local nextBody = nextNearbyCorpseBody(playerObj, trashCan, previousBody)
+    if not nextBody then
+        debugLog("repeat-action stop no nearby storable corpse")
+        return false
+    end
+
+    debugLog("repeat-action queue body=" .. describeObject(nextBody) .. " trashCan=" .. describeObject(trashCan))
+    ISTimedActionQueue.add(CJSPutDraggedCorpseInTrashAction:new(playerObj, trashCan, nextBody, nil, true))
+    return true
+end
+
+CJSPutNextNearbyCorpseInTrashAction = ISBaseTimedAction:derive("CJSPutNextNearbyCorpseInTrashAction")
+
+function CJSPutNextNearbyCorpseInTrashAction:isValid()
+    return self.character ~= nil and targetContainerForObject(self.trashCan) ~= nil
+end
+
+function CJSPutNextNearbyCorpseInTrashAction:perform()
+    if queueNextNearbyCorpseInTrash then
+        queueNextNearbyCorpseInTrash(self.character, self.trashCan)
+    end
+
+    ISBaseTimedAction.perform(self)
+end
+
+function CJSPutNextNearbyCorpseInTrashAction:new(character, trashCan)
+    local o = ISBaseTimedAction.new(self, character)
+    o.trashCan = trashCan
+    o.stopOnWalk = true
+    o.stopOnRun = true
+    o.maxTime = 1
+    o.forceProgressBar = false
     return o
 end
 
