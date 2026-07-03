@@ -5,7 +5,7 @@ require "TimedActions/ISInventoryTransferAction"
 pcall(require, "PickupCorpse/TimedActions/ISPickupCorpseAction")
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.10"
+CJSMultiCorpseTrash.version = "0.1.11"
 CJSMultiCorpseTrash.draggedCorpseByPlayer = CJSMultiCorpseTrash.draggedCorpseByPlayer or {}
 
 local unpackArgs = unpack or table.unpack
@@ -30,6 +30,10 @@ local zuperCartItemTypes = {
     ["TMC.CartContainer2"] = true,
     ["TMC.TrolleyContainer"] = true,
     ["TMC.TrolleyContainer2"] = true,
+}
+
+local saucedCartItemTypes = {
+    ["SaucedCarts.ShoppingCart"] = true,
 }
 
 local function isObjectLike(object)
@@ -568,10 +572,43 @@ local function isZuperCartObject(object)
     return isZuperCartItem(worldInventoryItem(object))
 end
 
+local function isSaucedCartItem(item)
+    local fullType = call(item, "getFullType")
+    if fullType ~= nil and saucedCartItemTypes[tostring(fullType)] == true then
+        return true
+    end
+
+    if SaucedCarts and SaucedCarts.safeIsCart then
+        local ok, result = pcall(function()
+            return SaucedCarts.safeIsCart(item)
+        end)
+        return ok and result == true
+    end
+
+    return false
+end
+
+local function isSaucedCartObject(object)
+    return isSaucedCartItem(worldInventoryItem(object))
+end
+
+local function isCartTargetObject(object)
+    return isZuperCartObject(object) or isSaucedCartObject(object)
+end
+
+local function targetContainerForCartItem(item)
+    if not isZuperCartItem(item) and not isSaucedCartItem(item) then return nil end
+
+    local container = call(item, "getItemContainer")
+    if container then return container end
+
+    return call(item, "getInventory")
+end
+
 local function targetContainerForObject(object)
     local item = worldInventoryItem(object)
-    if isZuperCartItem(item) then
-        local container = call(item, "getInventory")
+    if item then
+        local container = targetContainerForCartItem(item)
         if container then return container end
     end
 
@@ -587,7 +624,7 @@ local function isTrashCanObject(object)
     local container = targetContainerForObject(object)
     if not container then return false end
 
-    if isZuperCartObject(object) then return true end
+    if isCartTargetObject(object) then return true end
     if instanceof and instanceof(object, "IsoWorldInventoryObject") then return false end
 
     if propertyIs(object, "IsTrashCan") then return true end
@@ -709,7 +746,10 @@ local function containerHasCapacity(container, playerObj, item)
     end
     if not capacity then return true end
 
-    local contentsWeight = tonumber(call(container, "getContentsWeight")) or 0
+    local contentsWeight = tonumber(call(container, "getCapacityWeight"))
+    if not contentsWeight then
+        contentsWeight = tonumber(call(container, "getContentsWeight")) or 0
+    end
     local itemWeight = tonumber(call(item, "getUnequippedWeight"))
     if not itemWeight then
         itemWeight = tonumber(call(item, "getActualWeight")) or 0
@@ -795,13 +835,44 @@ local function nextNearbyCorpseBody(playerObj, trashCan, skipBody)
     return scanAroundForStorableDeadBody(call(playerObj, "getCurrentSquare"), container, playerObj, skipBody, checked)
 end
 
-local function updateContainerAfterAdd(container, trashCan)
+local function updateContainerAfterAdd(container, trashCan, playerObj)
     call(container, "setDrawDirty", true)
     call(container, "setHasBeenLooted", true)
 
     if not isClient() and trashCan and call(trashCan, "getOverlaySprite") and ItemPicker then
         ItemPicker.updateOverlaySprite(trashCan)
     end
+
+    local item = worldInventoryItem(trashCan)
+    if isSaucedCartItem(item) and SaucedCarts and SaucedCarts.updateCartVisual then
+        pcall(function()
+            SaucedCarts.updateCartVisual(item, playerObj)
+        end)
+    end
+
+    local corpseStorage = SaucedCarts and SaucedCarts.CorpseStorage
+    if isSaucedCartItem(item) and corpseStorage and corpseStorage.reconcile then
+        pcall(function()
+            local square = nil
+            if corpseStorage.cartTargetSquare then
+                square = corpseStorage.cartTargetSquare(item, playerObj)
+            end
+            corpseStorage.reconcile(item, square or call(trashCan, "getSquare"))
+        end)
+    end
+end
+
+local function stampSaucedCartCorpse(trashCan, corpse, corpseBody)
+    local item = worldInventoryItem(trashCan)
+    if not isSaucedCartItem(item) then return end
+    if not SaucedCarts or not SaucedCarts.CorpseStorage then return end
+
+    local stampDeathTime = SaucedCarts.CorpseStorage.stampDeathTime
+    if not stampDeathTime then return end
+
+    pcall(function()
+        stampDeathTime(corpse, corpseBody)
+    end)
 end
 
 local queueNextNearbyCorpseInTrash
@@ -902,7 +973,8 @@ function CJSPutCachedCorpseInTrashAction:perform()
 
         clearDraggedCorpse(self.character)
         clearCachedDraggedCorpse(self.character)
-        updateContainerAfterAdd(container, self.trashCan)
+        stampSaucedCartCorpse(self.trashCan, self.corpse, self.corpseBody)
+        updateContainerAfterAdd(container, self.trashCan, self.character)
         stored = true
     end
 
@@ -1028,7 +1100,8 @@ function CJSPutDraggedCorpseInTrashAction:perform()
         end
 
         clearDraggedCorpse(self.character)
-        updateContainerAfterAdd(container, self.trashCan)
+        stampSaucedCartCorpse(self.trashCan, corpse, self.corpseBody)
+        updateContainerAfterAdd(container, self.trashCan, self.character)
         stored = true
     end
 
@@ -1074,6 +1147,11 @@ function CJSPutNextNearbyCorpseInTrashAction:isValid()
 end
 
 function CJSPutNextNearbyCorpseInTrashAction:perform()
+    local container = targetContainerForObject(self.trashCan)
+    if container then
+        updateContainerAfterAdd(container, self.trashCan, self.character)
+    end
+
     if queueNextNearbyCorpseInTrash then
         queueNextNearbyCorpseInTrash(self.character, self.trashCan)
     end
@@ -1197,7 +1275,9 @@ local function addCorpseTrashOption(player, context, worldobjects, test, forceVi
     if not context then return false end
 
     local optionName = "Put Corpse in Garbage"
-    if isZuperCartObject(offer.trashCan) then
+    if isSaucedCartObject(offer.trashCan) then
+        optionName = "Put Corpse in Cart"
+    elseif isZuperCartObject(offer.trashCan) then
         optionName = "Put Corpse in Cart/Trolley"
     end
     if context:getOptionFromName(optionName) then
@@ -1218,7 +1298,9 @@ local function addCorpseTrashOption(player, context, worldobjects, test, forceVi
     if not containerHasCapacity(offer.container, offer.playerObj, offer.corpse) then
         option.notAvailable = true
         local capacityDescription = "This trash can does not have room for the corpse."
-        if isZuperCartObject(offer.trashCan) then
+        if isSaucedCartObject(offer.trashCan) then
+            capacityDescription = "This cart does not have room for the corpse."
+        elseif isZuperCartObject(offer.trashCan) then
             capacityDescription = "This cart/trolley does not have room for the corpse."
         end
         addTooltip(option, optionName, capacityDescription)
