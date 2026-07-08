@@ -5,7 +5,7 @@ require "TimedActions/ISInventoryTransferAction"
 pcall(require, "PickupCorpse/TimedActions/ISPickupCorpseAction")
 
 CJSMultiCorpseTrash = CJSMultiCorpseTrash or {}
-CJSMultiCorpseTrash.version = "0.1.11"
+CJSMultiCorpseTrash.version = "0.1.12"
 CJSMultiCorpseTrash.draggedCorpseByPlayer = CJSMultiCorpseTrash.draggedCorpseByPlayer or {}
 
 local unpackArgs = unpack or table.unpack
@@ -116,18 +116,24 @@ local function describeSquare(square)
     return tostring(call(square, "getX")) .. "," .. tostring(call(square, "getY")) .. "," .. tostring(call(square, "getZ"))
 end
 
+local function describeClass(object)
+    local class = call(object, "getClass")
+    if not class then return nil end
+
+    local className = tostring(class)
+    if string.sub(className, 1, 6) == "class " then
+        return string.sub(className, 7)
+    end
+
+    return className
+end
+
 local function describeObject(object)
     if not object then return "nil" end
 
-    local className = nil
-    local class = call(object, "getClass")
-    if class then
-        className = call(class, "getName")
-    end
-
     local parts = {
         tostring(object),
-        "class=" .. tostring(className),
+        "class=" .. tostring(describeClass(object)),
         "objectName=" .. tostring(call(object, "getObjectName")),
         "name=" .. tostring(call(object, "getName")),
         "type=" .. tostring(call(object, "getType")),
@@ -313,7 +319,7 @@ local function describeDragState(dragState)
         tostring(dragState),
         "Type=" .. tostring(tableValue(dragState, "Type")),
         "type=" .. tostring(tableValue(dragState, "type")),
-        "class=" .. tostring(call(call(dragState, "getClass"), "getName")),
+        "class=" .. tostring(describeClass(dragState)),
     }
 
     for _, key in ipairs(dragBodyKeys) do

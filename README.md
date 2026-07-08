@@ -13,3 +13,5 @@ Version 0.1.9 lets ZuperCarts carts and trolleys use the same corpse-to-containe
 Version 0.1.10 repeats the action for additional nearby corpses until no corpse is close enough or the target container runs out of room.
 
 Version 0.1.11 adds SaucedCarts cart targets, using their inner cart container and refreshing cart visuals after corpse storage.
+
+Version 0.1.12 avoids B42.19 Lua stack traces from debug class-name inspection while corpse trash actions validate.

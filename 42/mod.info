@@ -3,5 +3,5 @@ id=cjsMultiCorpseTrash
 description=Restores a corpse-to-trash context action for boosted trash cans, ZuperCarts, and SaucedCarts containers.
 poster=poster.png
 author=CJ Storrs
-modversion=0.1.11
+modversion=0.1.12
 versionMin=42.0.0
